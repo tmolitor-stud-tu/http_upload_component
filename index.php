@@ -20,7 +20,15 @@ if(strlen($uuid)!=36)			//this is no uuid (sloppy test)
 $file_path=dirname(__FILE__)."/upload/$uuid/data";
 $attrs_path=dirname(__FILE__)."/upload/$uuid/attrs";
 
-if(in_array($_SERVER['REQUEST_METHOD'], array('GET', 'HEAD')))
+//cors support for all supported methods
+if(in_array($_SERVER['REQUEST_METHOD'], array('OPTIONS', 'HEAD', 'GET', 'PUT')))
+{
+	header("Access-Control-Allow-Origin: *");
+	header("Access-Control-Allow-Headers: Content-Type");
+	header("Access-Control-Allow-Methods: OPTIONS, HEAD, GET, PUT");
+}
+
+if(in_array($_SERVER['REQUEST_METHOD'], array('HEAD', 'GET')))
 {
 	if(!file_exists($file_path))
 		die(http_return(404));
@@ -30,7 +38,7 @@ if(in_array($_SERVER['REQUEST_METHOD'], array('GET', 'HEAD')))
 	header('X-Content-Type-Options: nosniff');
 	header('Content-Length: '.filesize($file_path));
 	header("Content-Type: $mime_type");
-	header('Content-Disposition: inline');
+	header("Content-Disposition: attachment");
 	if($_SERVER['REQUEST_METHOD']=='GET')
 		output($file_path);
 	exit;
@@ -57,6 +65,8 @@ else if($_SERVER['REQUEST_METHOD']=='PUT')
 	}
 	die(http_return(200));
 }
+else if($_SERVER['REQUEST_METHOD']=='OPTIONS')		//cors preflight requests
+	die();
 else
 	die(http_return(400));
 
