@@ -349,6 +349,11 @@ class JAXL extends XMPPStream {
 	
 	public function retry() {
 		$retry_after = pow(2, $this->retry_attempt) * $this->retry_interval;
+		if($retry_after > $this->retry_max_interval)
+		{
+			_error("Max retry interval of ".$this->retry_max_interval." seconds reached, exiting!");
+			return;
+		}
 		$this->retry_attempt++;
 		_info("Will try to restart in ".$retry_after." seconds");
 		

@@ -10,6 +10,10 @@ protocol can be found in [XEP-0363: HTTP File Upload](http://xmpp.org/extensions
 
 ### Prerequisites
 You need a webserver capable of serving php files and be able to use php as cli as well.
+
+The webserver needs to be capable to reroute requests in the subdirectory of the component to the index.php file.
+An example Apache .htaccess file to accomplish this is included.
+
 The code runs under php 5.4 and above (not sure if it does run on php 7, though).
 
 ### Installation
