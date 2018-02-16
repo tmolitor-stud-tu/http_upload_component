@@ -22,7 +22,8 @@ define('XMPP_HOST', $config['xmpp']['xmpp_host']);
 define('XMPP_PORT', $config['xmpp']['xmpp_port']);
 define('KEEPALIVE', $config['xmpp']['keepalive']);
 
-define('NS_HTTPUPLOAD', 'urn:xmpp:http:upload');
+define('NS_HTTPUPLOAD_LEGACY', 'urn:xmpp:http:upload');
+define('NS_HTTPUPLOAD', 'urn:xmpp:http:upload:0');
 
 $log_levels=array('DEBUG'=>JAXL_DEBUG, 'INFO'=>JAXL_INFO, 'NOTICE'=>JAXL_NOTICE, 'WARNING'=>JAXL_WARNING, 'ERROR'=>JAXL_ERROR);
 $running=false;
@@ -43,6 +44,11 @@ $comp->xeps['0030']->set_identity('store', 'file', 'HTTP Upload Component');
 $comp->xeps['0030']->add_feature(NS_HTTPUPLOAD);
 $comp->xeps['0030']->set_form_data(array(
 	'FORM_TYPE'=>array('type'=>'hidden', 'value'=>NS_HTTPUPLOAD),
+	'max-file-size'=>MAX_FILE_SIZE,
+));
+$comp->xeps['0030']->add_feature(NS_HTTPUPLOAD_LEGACY);
+$comp->xeps['0030']->set_form_data(array(
+	'FORM_TYPE'=>array('type'=>'hidden', 'value'=>NS_HTTPUPLOAD_LEGACY),
 	'max-file-size'=>MAX_FILE_SIZE,
 ));
 
@@ -75,18 +81,17 @@ $comp->add_cb('on_get_iq', function($stanza)
 	if(($request = $stanza->exists('request', NS_HTTPUPLOAD)))
 	{
 		$upload_id=gen_uuid();
-		$filename=basename(get_text($request, 'filename'));
-		$size=get_text($request, 'size');
-		$content_type=get_text($request, 'content-type');
+		$filename=basename($request->attrs['filename']);
+		$size=$request->attrs['size'];
+		$content_type=$request->attrs['content-type'];
 		_notice("[$upload_id] Got XMPP slot request for '$filename' ($content_type) with size $size...");
 		
 		if($stanza->from_domain!=ALLOWED_DOMAIN)
 		{
 			_warning("User at domain '{$stanza->from_domain}' not allowed to upload files...");
 			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
-			$response->c('request', NS_HTTPUPLOAD)
-					 ->c('filename')->t($filename)->up()
-					 ->c('size')->t($size)->up()->up()
+			$response->c('request', NS_HTTPUPLOAD, array('filename'=>$filename, 'size'=>$size))
+					 ->up()
 					 ->c('error', null, array('type'=>'cancel'))
 					 ->c('not-allowed', 'urn:ietf:params:xml:ns:xmpp-stanzas')->up()
 					 ->c('text', 'urn:ietf:params:xml:ns:xmpp-stanzas', array(), 'You are not allowed to upload files to this host')->up();
@@ -96,9 +101,7 @@ $comp->add_cb('on_get_iq', function($stanza)
 		{
 			_warning("Filesize $size exceeds maximum of ".MAX_FILE_SIZE." bytes...");
 			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
-			$response->c('request', NS_HTTPUPLOAD)
-					 ->c('filename')->t($filename)->up()
-					 ->c('size')->t($size)->up()
+			$response->c('request', NS_HTTPUPLOAD, array('filename'=>$filename, 'size'=>$size))
 					 ->up()
 					 ->c('error', null, array('type'=>'cancel'))
 					 ->c('not-acceptable', 'urn:ietf:params:xml:ns:xmpp-stanzas')->up()
@@ -114,6 +117,92 @@ $comp->add_cb('on_get_iq', function($stanza)
 			$get_slot=GET_PREFIX."$upload_id/".rawurlencode($filename);
 			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
 			$response->c('slot', NS_HTTPUPLOAD)
+					 ->c('put', null, array('url'=>$put_slot))->up()
+					 ->c('get', null, array('url'=>$get_slot))->up()
+					 ->up();
+			
+			//open and lock slot db
+			$slot_db=fopen(SLOT_DB, 'c');
+			while(!flock($slot_db, LOCK_EX | LOCK_NB))		//try every 100ms for 8 seconds
+			{
+				if($count++>80)
+				{
+					$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
+					$response->c('request', NS_HTTPUPLOAD, array('filename'=>$filename, 'size'=>$size))
+							 ->up()
+							 ->c('error', null, array('type'=>'cancel'))
+							 ->c('resource-constraint', 'urn:ietf:params:xml:ns:xmpp-stanzas')->up()
+							 ->c('text', 'urn:ietf:params:xml:ns:xmpp-stanzas', array(), 'Server too busy, please try again in a few minutes')->up()
+							 ->up();
+					$comp->send($response);
+					return;
+				}
+				usleep(100000);
+			}
+			//read db
+			$active_slots=@unserialize(file_get_contents(SLOT_DB));
+			if(!is_array($active_slots))
+				$active_slots=array();
+			//add new slot
+			$active_slots[$upload_id]=time()+SLOT_TIMEOUT;
+			//delete timed out slots
+			$_active_slots=$active_slots;
+			foreach($_active_slots as $uuid=>$time)
+				if($time<time())
+				{
+					_info("Old slot $uuid expired ($time>".time()."), removing entry...");
+					unset($active_slots[$uuid]);
+				}
+			//save and close db
+			file_put_contents(SLOT_DB, serialize($active_slots));
+			flock($slot_db, LOCK_UN);
+			fclose($slot_db);
+			
+			$comp->send($response);
+		}
+	}
+	if(($request = $stanza->exists('request', NS_HTTPUPLOAD_LEGACY)))
+	{
+		$upload_id=gen_uuid();
+		$filename=basename(get_text($request, 'filename'));
+		$size=get_text($request, 'size');
+		$content_type=get_text($request, 'content-type');
+		_notice("[$upload_id] Got XMPP slot request for '$filename' ($content_type) with size $size...");
+		
+		if($stanza->from_domain!=ALLOWED_DOMAIN)
+		{
+			_warning("User at domain '{$stanza->from_domain}' not allowed to upload files...");
+			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
+			$response->c('request', NS_HTTPUPLOAD_LEGACY)
+					 ->c('filename')->t($filename)->up()
+					 ->c('size')->t($size)->up()->up()
+					 ->c('error', null, array('type'=>'cancel'))
+					 ->c('not-allowed', 'urn:ietf:params:xml:ns:xmpp-stanzas')->up()
+					 ->c('text', 'urn:ietf:params:xml:ns:xmpp-stanzas', array(), 'You are not allowed to upload files to this host')->up();
+			$comp->send($response);
+		}
+		else if($size>MAX_FILE_SIZE)
+		{
+			_warning("Filesize $size exceeds maximum of ".MAX_FILE_SIZE." bytes...");
+			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
+			$response->c('request', NS_HTTPUPLOAD_LEGACY)
+					 ->c('filename')->t($filename)->up()
+					 ->c('size')->t($size)->up()
+					 ->up()
+					 ->c('error', null, array('type'=>'cancel'))
+					 ->c('not-acceptable', 'urn:ietf:params:xml:ns:xmpp-stanzas')->up()
+					 ->c('text', 'urn:ietf:params:xml:ns:xmpp-stanzas', array(), 'File too large. The maximum file size is '.MAX_FILE_SIZE.' bytes')->up()
+					 ->c('file-too-large', NS_HTTPUPLOAD_LEGACY)
+					 ->c('max-file-size')->t(MAX_FILE_SIZE)->up()->up()
+					 ->up();
+			$comp->send($response);
+		}
+		else
+		{
+			$put_slot=PUT_PREFIX."$upload_id/".rawurlencode($filename);
+			$get_slot=GET_PREFIX."$upload_id/".rawurlencode($filename);
+			$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
+			$response->c('slot', NS_HTTPUPLOAD_LEGACY)
 					 ->c('put')->t($put_slot)->up()
 					 ->c('get')->t($get_slot)->up()
 					 ->up();
@@ -125,7 +214,7 @@ $comp->add_cb('on_get_iq', function($stanza)
 				if($count++>80)
 				{
 					$response=$comp->get_iq_pkt(array('type'=>'result', 'from'=>get_jid($comp)->to_string(), 'to'=>$stanza->from, 'id'=>$stanza->id), null);
-					$response->c('request', NS_HTTPUPLOAD)
+					$response->c('request', NS_HTTPUPLOAD_LEGACY)
 							 ->c('filename')->t($filename)->up()
 							 ->c('size')->t($size)->up()
 							 ->up()
