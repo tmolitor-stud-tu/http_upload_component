@@ -35,6 +35,10 @@ if(in_array($_SERVER['REQUEST_METHOD'], array('HEAD', 'GET')))
 	$finfo=finfo_open(FILEINFO_MIME_TYPE);
 	$mime_type=finfo_file($finfo, $file_path);
 	finfo_close($finfo);
+	//patch in correct mimetype for m4a files
+	$ext=pathinfo($original_filename, PATHINFO_EXTENSION);
+	if($ext=='m4a')
+		$mime_type='audio/mp4';
 	header('X-Content-Type-Options: nosniff');
 	header('Content-Length: '.filesize($file_path));
 	header("Content-Type: $mime_type");
